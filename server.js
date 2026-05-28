@@ -2,23 +2,23 @@
 // Rode com: node server.js
 const { WebSocketServer } = require("ws");
 const http = require("http");
-
+ 
 // Railway/Render injetam PORT automaticamente; fallback para 4000 local
 const PORT = process.env.PORT || 4000;
-
+ 
 // Servidor HTTP base (necessário para Railway/Render detectarem o serviço ativo)
 const server = http.createServer((req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.end("Opostos Perfeitos — WebSocket Server OK");
 });
-
+ 
 const wss = new WebSocketServer({ server });
-
+ 
 // rooms: { [roomId]: { players, deck, flipped, matched, currentPlayerIndex, difficulty, maxPlayers, gameStarted, gameOver } }
 const rooms = {};
 // clientRoom: Map<ws, { roomId, playerId }>
 const clientRoom = new Map();
-
+ 
 function broadcast(roomId, type, payload) {
   const room = rooms[roomId];
   if (!room) return;
@@ -30,11 +30,11 @@ function broadcast(roomId, type, payload) {
     }
   });
 }
-
+ 
 function sendTo(ws, type, payload) {
   if (ws.readyState === 1) ws.send(JSON.stringify({ type, payload }));
 }
-
+ 
 function checkGameOver(roomId) {
   const room = rooms[roomId];
   if (!room) return;
@@ -43,13 +43,13 @@ function checkGameOver(roomId) {
     broadcast(roomId, "ROOM_STATE", room);
   }
 }
-
+ 
 wss.on("connection", (ws) => {
   ws.on("message", (raw) => {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
     const { type, payload } = msg;
-
+ 
     if (type === "GET_ROOM") {
       const room = rooms[payload.roomId] || null;
       if (payload.playerId && payload.roomId) {
@@ -57,7 +57,7 @@ wss.on("connection", (ws) => {
       }
       sendTo(ws, "ROOM_STATE", room);
     }
-
+ 
     else if (type === "JOIN_ROOM") {
       const { roomId, player, isHost, difficulty, maxPlayers } = payload;
       if (!rooms[roomId]) {
@@ -85,7 +85,7 @@ wss.on("connection", (ws) => {
       clientRoom.set(ws, { roomId, playerId: player.id });
       broadcast(roomId, "ROOM_STATE", room);
     }
-
+ 
     else if (type === "UPDATE_SETTINGS") {
       const room = rooms[payload.roomId];
       if (!room) return;
@@ -93,7 +93,7 @@ wss.on("connection", (ws) => {
       if (payload.maxPlayers) room.maxPlayers = payload.maxPlayers;
       broadcast(payload.roomId, "ROOM_STATE", room);
     }
-
+ 
     else if (type === "START_GAME") {
       const room = rooms[payload.roomId];
       if (!room) return;
@@ -106,7 +106,7 @@ wss.on("connection", (ws) => {
       room.players = room.players.map((p) => ({ ...p, score: 0 }));
       broadcast(payload.roomId, "ROOM_STATE", room);
     }
-
+ 
     else if (type === "FLIP_CARD") {
       const { roomId, cardId, playerId } = payload;
       const room = rooms[roomId];
@@ -114,13 +114,13 @@ wss.on("connection", (ws) => {
       if (room.flipped.includes(cardId) || room.matched.includes(cardId)) return;
       if (room.players[room.currentPlayerIndex]?.id !== playerId) return;
       if (room.flipped.length >= 2) return;
-
+ 
       room.flipped = [...room.flipped, cardId];
-
+ 
       if (room.flipped.length === 2) {
         const [a, b] = room.flipped.map((id) => room.deck.find((c) => c.id === id));
         broadcast(roomId, "ROOM_STATE", { ...room });
-
+ 
         setTimeout(() => {
           if (a && b && a.groupId === b.groupId && a.side !== b.side) {
             room.matched = [...room.matched, a.id, b.id];
@@ -137,7 +137,7 @@ wss.on("connection", (ws) => {
         broadcast(roomId, "ROOM_STATE", { ...room });
       }
     }
-
+ 
     else if (type === "RESTART_GAME") {
       const room = rooms[payload.roomId];
       if (!room) return;
@@ -150,8 +150,23 @@ wss.on("connection", (ws) => {
       room.players = room.players.map((p) => ({ ...p, score: 0 }));
       broadcast(payload.roomId, "ROOM_STATE", room);
     }
+ 
+    // Reseta a sala para o estado de lobby (antes do jogo começar)
+    // Disparado quando jogadores voltam para o lobby após "Jogar Novamente"
+    else if (type === "RESET_ROOM") {
+      const room = rooms[payload.roomId];
+      if (!room) return;
+      room.deck = [];
+      room.flipped = [];
+      room.matched = [];
+      room.currentPlayerIndex = 0;
+      room.gameStarted = false;
+      room.gameOver = false;
+      room.players = room.players.map((p) => ({ ...p, score: 0 }));
+      broadcast(payload.roomId, "ROOM_STATE", room);
+    }
   });
-
+ 
   ws.on("close", () => {
     const info = clientRoom.get(ws);
     if (info) {
@@ -169,7 +184,7 @@ wss.on("connection", (ws) => {
     }
   });
 });
-
+ 
 server.listen(PORT, () => {
   console.log(`✅ Servidor HTTP+WebSocket rodando na porta ${PORT}`);
 });
