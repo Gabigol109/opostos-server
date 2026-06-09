@@ -44,6 +44,16 @@ function checkGameOver(roomId) {
   }
 }
  
+// [CHANGE 3] Encerra partida se restar menos de 2 jogadores durante o jogo
+function checkPlayersRemaining(roomId) {
+  const room = rooms[roomId];
+  if (!room) return;
+  if (room.gameStarted && !room.gameOver && room.players.length < 2) {
+    room.gameOver = true;
+    broadcast(roomId, "ROOM_STATE", room);
+  }
+}
+ 
 wss.on("connection", (ws) => {
   ws.on("message", (raw) => {
     let msg;
@@ -75,6 +85,13 @@ wss.on("connection", (ws) => {
         };
       }
       const room = rooms[roomId];
+ 
+      // [CHANGE 2] Bloqueia entrada de novos jogadores após o jogo iniciar
+      if (room.gameStarted) {
+        sendTo(ws, "ERROR", "O jogo já começou. Aguarde a próxima partida.");
+        return;
+      }
+ 
       if (!room.players.find((p) => p.id === player.id)) {
         if (room.players.length >= room.maxPlayers) {
           sendTo(ws, "ERROR", "Sala cheia!");
@@ -165,6 +182,47 @@ wss.on("connection", (ws) => {
       room.players = room.players.map((p) => ({ ...p, score: 0 }));
       broadcast(payload.roomId, "ROOM_STATE", room);
     }
+ 
+    // [CHANGE 3] PING — cliente envia a cada 5s para sinalizar que está vivo.
+    // O servidor faz broadcast de PONG com o playerId para que os demais
+    // clientes atualizem o timestamp desse jogador no lastPongRef.
+    else if (type === "PING") {
+      const { roomId, playerId } = payload;
+      if (!roomId || !playerId) return;
+      broadcast(roomId, "PONG", { playerId });
+    }
+ 
+    // [CHANGE 3] REMOVE_PLAYER — disparado por qualquer cliente que detecte
+    // um jogador sem responder ao PONG por mais de 12s.
+    // O servidor remove o jogador, reajusta o índice de turno e encerra
+    // a partida se restar menos de 2 jogadores.
+    else if (type === "REMOVE_PLAYER") {
+      const { roomId, playerId } = payload;
+      const room = rooms[roomId];
+      if (!room) return;
+ 
+      const idx = room.players.findIndex((p) => p.id === playerId);
+      if (idx === -1) return; // já foi removido por outro cliente
+ 
+      // Remove o jogador da lista
+      room.players.splice(idx, 1);
+ 
+      // Sala ficou vazia: destrói
+      if (room.players.length === 0) {
+        delete rooms[roomId];
+        return;
+      }
+ 
+      // Reajusta índice do turno para não ultrapassar o array
+      if (room.currentPlayerIndex >= room.players.length) {
+        room.currentPlayerIndex = 0;
+      }
+ 
+      broadcast(roomId, "ROOM_STATE", { ...room });
+ 
+      // Verifica se a partida deve encerrar por falta de jogadores
+      checkPlayersRemaining(roomId);
+    }
   });
  
   ws.on("close", () => {
@@ -173,6 +231,7 @@ wss.on("connection", (ws) => {
       const { roomId, playerId } = info;
       const room = rooms[roomId];
       if (room && !room.gameStarted) {
+        // Fora do jogo: remove imediatamente do lobby
         room.players = room.players.filter((p) => p.id !== playerId);
         if (room.players.length === 0) {
           delete rooms[roomId];
@@ -180,6 +239,8 @@ wss.on("connection", (ws) => {
           broadcast(roomId, "ROOM_STATE", room);
         }
       }
+      // Durante o jogo a remoção é feita via REMOVE_PLAYER (heartbeat),
+      // que garante que o jogo continue sem travar esperando o próximo turno.
       clientRoom.delete(ws);
     }
   });
