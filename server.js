@@ -14,7 +14,7 @@ const server = http.createServer((req, res) => {
  
 const wss = new WebSocketServer({ server });
  
-// rooms: { [roomId]: { players, deck, flipped, matched, currentPlayerIndex, difficulty, maxPlayers, gameStarted, gameOver } }
+// rooms: { [roomId]: { players, deck, flipped, matched, currentPlayerIndex, difficulty, maxPlayers, gameStarted, gameOver, gameOverReason } }
 const rooms = {};
 // clientRoom: Map<ws, { roomId, playerId }>
 const clientRoom = new Map();
@@ -40,16 +40,18 @@ function checkGameOver(roomId) {
   if (!room) return;
   if (room.matched.length === room.deck.length) {
     room.gameOver = true;
+    room.gameOverReason = "completed";
     broadcast(roomId, "ROOM_STATE", room);
   }
 }
  
-// [CHANGE 3] Encerra partida se restar menos de 2 jogadores durante o jogo
+// Encerra partida se restar menos de 2 jogadores durante o jogo
 function checkPlayersRemaining(roomId) {
   const room = rooms[roomId];
   if (!room) return;
   if (room.gameStarted && !room.gameOver && room.players.length < 2) {
     room.gameOver = true;
+    room.gameOverReason = "not_enough_players";
     broadcast(roomId, "ROOM_STATE", room);
   }
 }
@@ -82,11 +84,12 @@ wss.on("connection", (ws) => {
           maxPlayers: maxPlayers || 4,
           gameStarted: false,
           gameOver: false,
+          gameOverReason: null,
         };
       }
       const room = rooms[roomId];
  
-      // [CHANGE 2] Bloqueia entrada de novos jogadores após o jogo iniciar
+      // Bloqueia entrada de novos jogadores após o jogo iniciar
       if (room.gameStarted) {
         sendTo(ws, "ERROR", "O jogo já começou. Aguarde a próxima partida.");
         return;
@@ -120,6 +123,7 @@ wss.on("connection", (ws) => {
       room.currentPlayerIndex = 0;
       room.gameStarted = true;
       room.gameOver = false;
+      room.gameOverReason = null;
       room.players = room.players.map((p) => ({ ...p, score: 0 }));
       broadcast(payload.roomId, "ROOM_STATE", room);
     }
@@ -164,12 +168,12 @@ wss.on("connection", (ws) => {
       room.currentPlayerIndex = 0;
       room.gameStarted = true;
       room.gameOver = false;
+      room.gameOverReason = null;
       room.players = room.players.map((p) => ({ ...p, score: 0 }));
       broadcast(payload.roomId, "ROOM_STATE", room);
     }
  
     // Reseta a sala para o estado de lobby (antes do jogo começar)
-    // Disparado quando jogadores voltam para o lobby após "Jogar Novamente"
     else if (type === "RESET_ROOM") {
       const room = rooms[payload.roomId];
       if (!room) return;
@@ -179,23 +183,20 @@ wss.on("connection", (ws) => {
       room.currentPlayerIndex = 0;
       room.gameStarted = false;
       room.gameOver = false;
+      room.gameOverReason = null;
       room.players = room.players.map((p) => ({ ...p, score: 0 }));
       broadcast(payload.roomId, "ROOM_STATE", room);
     }
  
-    // [CHANGE 3] PING — cliente envia a cada 5s para sinalizar que está vivo.
-    // O servidor faz broadcast de PONG com o playerId para que os demais
-    // clientes atualizem o timestamp desse jogador no lastPongRef.
+    // PING — cliente envia a cada 5s para sinalizar que está vivo.
     else if (type === "PING") {
       const { roomId, playerId } = payload;
       if (!roomId || !playerId) return;
       broadcast(roomId, "PONG", { playerId });
     }
  
-    // [CHANGE 3] REMOVE_PLAYER — disparado por qualquer cliente que detecte
+    // REMOVE_PLAYER — disparado por qualquer cliente que detecte
     // um jogador sem responder ao PONG por mais de 12s.
-    // O servidor remove o jogador, reajusta o índice de turno e encerra
-    // a partida se restar menos de 2 jogadores.
     else if (type === "REMOVE_PLAYER") {
       const { roomId, playerId } = payload;
       const room = rooms[roomId];
@@ -204,6 +205,9 @@ wss.on("connection", (ws) => {
       const idx = room.players.findIndex((p) => p.id === playerId);
       if (idx === -1) return; // já foi removido por outro cliente
  
+      const removedPlayer = room.players[idx];
+      const wasHost = removedPlayer.isHost;
+ 
       // Remove o jogador da lista
       room.players.splice(idx, 1);
  
@@ -211,6 +215,19 @@ wss.on("connection", (ws) => {
       if (room.players.length === 0) {
         delete rooms[roomId];
         return;
+      }
+ 
+      // Se o host saiu durante a partida → encerra e notifica todos
+      if (wasHost && room.gameStarted && !room.gameOver) {
+        room.gameOver = true;
+        room.gameOverReason = "host_left";
+        broadcast(roomId, "ROOM_STATE", { ...room });
+        return;
+      }
+ 
+      // Se o host saiu no lobby → passa o host para o próximo jogador
+      if (wasHost && !room.gameStarted) {
+        room.players[0].isHost = true;
       }
  
       // Reajusta índice do turno para não ultrapassar o array
@@ -232,15 +249,20 @@ wss.on("connection", (ws) => {
       const room = rooms[roomId];
       if (room && !room.gameStarted) {
         // Fora do jogo: remove imediatamente do lobby
-        room.players = room.players.filter((p) => p.id !== playerId);
-        if (room.players.length === 0) {
-          delete rooms[roomId];
-        } else {
-          broadcast(roomId, "ROOM_STATE", room);
+        const idx = room.players.findIndex((p) => p.id === playerId);
+        if (idx !== -1) {
+          const wasHost = room.players[idx].isHost;
+          room.players.splice(idx, 1);
+          if (room.players.length === 0) {
+            delete rooms[roomId];
+          } else {
+            // Passa o host para o próximo se necessário
+            if (wasHost) room.players[0].isHost = true;
+            broadcast(roomId, "ROOM_STATE", room);
+          }
         }
       }
-      // Durante o jogo a remoção é feita via REMOVE_PLAYER (heartbeat),
-      // que garante que o jogo continue sem travar esperando o próximo turno.
+      // Durante o jogo a remoção é feita via REMOVE_PLAYER (heartbeat)
       clientRoom.delete(ws);
     }
   });
